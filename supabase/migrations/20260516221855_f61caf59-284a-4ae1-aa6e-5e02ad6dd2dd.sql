@@ -1,0 +1,1 @@
+UPDATE public.settings SET value = '25000', updated_at = now() WHERE key = 'ticket_price';

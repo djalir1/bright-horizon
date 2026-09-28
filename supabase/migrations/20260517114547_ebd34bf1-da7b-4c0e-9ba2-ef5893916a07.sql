@@ -1,0 +1,1 @@
+TRUNCATE TABLE public.scan_logs, public.agent_logs, public.transactions, public.payments, public.users, public.codes, public.contact_messages, public.schools, public.agents RESTART IDENTITY CASCADE;

@@ -1,0 +1,549 @@
+-- ============================================================================
+-- SENIOR GALA KIGALI 2026 — FULL DATABASE (FRESH DEPLOY)
+-- S.A.D Corporation · seniorgalakigali.sadcorporation.com
+-- ----------------------------------------------------------------------------
+-- This is a SINGLE-FILE, fresh-install script. Run it ONCE on an empty
+-- Supabase project (SQL Editor → paste → Run). It rebuilds the entire DB,
+-- buckets, enums, functions, triggers, RLS policies and seed data.
+--
+-- ⚠ WARNING: This DROPS existing tables in `public`. Do NOT run on a DB
+-- that already has live data unless you have backed it up.
+--
+-- Reflects the NEW SIMPLIFIED WORKFLOW:
+--   • One single all-in payment (no separate 1,500 RWF reg fee)
+--   • Code + QR auto-issued at payment submission (no manual hand-out)
+--   • Admin reviews payment → confirmed | pending | rejected
+--   • Door scan: green / amber / red
+--   • Manual code generator kept ONLY as exception (cash / comp tickets)
+-- ============================================================================
+
+-- ============================================================================
+-- 0. RESET (drop in dependency-safe order)
+-- ============================================================================
+DROP TABLE IF EXISTS public.ticket_print_logs CASCADE;
+DROP TABLE IF EXISTS public.scan_logs         CASCADE;
+DROP TABLE IF EXISTS public.transactions      CASCADE;
+DROP TABLE IF EXISTS public.refunds           CASCADE;
+DROP TABLE IF EXISTS public.payments          CASCADE;
+DROP TABLE IF EXISTS public.users             CASCADE;
+DROP TABLE IF EXISTS public.codes             CASCADE;
+DROP TABLE IF EXISTS public.ticket_tiers      CASCADE;
+DROP TABLE IF EXISTS public.schools           CASCADE;
+DROP TABLE IF EXISTS public.settings          CASCADE;
+DROP TABLE IF EXISTS public.contact_messages  CASCADE;
+DROP TABLE IF EXISTS public.agent_logs        CASCADE;
+DROP TABLE IF EXISTS public.agents            CASCADE;
+DROP TABLE IF EXISTS public.user_roles        CASCADE;
+DROP TABLE IF EXISTS public.profiles          CASCADE;
+
+DROP FUNCTION IF EXISTS public.has_role(uuid, app_role)    CASCADE;
+DROP FUNCTION IF EXISTS public.handle_new_user()           CASCADE;
+DROP FUNCTION IF EXISTS public.increment_tier_sold()       CASCADE;
+DROP FUNCTION IF EXISTS public.update_updated_at_column()  CASCADE;
+
+DROP TYPE IF EXISTS public.app_role     CASCADE;
+DROP TYPE IF EXISTS public.ticket_state CASCADE;
+
+
+-- ============================================================================
+-- 1. ENUMS
+-- ============================================================================
+CREATE TYPE public.app_role AS ENUM ('superadmin', 'agent', 'door_in', 'door_out');
+CREATE TYPE public.ticket_state AS ENUM ('pending', 'confirmed', 'rejected');
+
+
+-- ============================================================================
+-- 2. SHARED FUNCTIONS
+-- ============================================================================
+CREATE OR REPLACE FUNCTION public.update_updated_at_column()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+BEGIN
+  NEW.updated_at = now();
+  RETURN NEW;
+END $$;
+
+
+-- ============================================================================
+-- 3. STAFF AUTH — profiles, user_roles, has_role, first-user bootstrap
+-- ============================================================================
+CREATE TABLE public.profiles (
+  id          uuid PRIMARY KEY,
+  full_name   text,
+  email       text,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, UPDATE ON public.profiles TO authenticated;
+GRANT ALL ON public.profiles TO service_role;
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Profiles readable by authenticated" ON public.profiles
+  FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Users can update own profile" ON public.profiles
+  FOR UPDATE TO authenticated USING (auth.uid() = id) WITH CHECK (auth.uid() = id);
+
+CREATE TABLE public.user_roles (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     uuid NOT NULL,
+  role        public.app_role NOT NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, role)
+);
+GRANT SELECT ON public.user_roles TO authenticated;
+GRANT ALL ON public.user_roles TO service_role;
+ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.has_role(_user_id uuid, _role public.app_role)
+RETURNS boolean
+LANGUAGE sql
+STABLE SECURITY DEFINER
+SET search_path = public
+AS $$
+  SELECT EXISTS (SELECT 1 FROM public.user_roles WHERE user_id = _user_id AND role = _role)
+$$;
+
+CREATE POLICY "Roles readable by authenticated" ON public.user_roles
+  FOR SELECT TO authenticated USING (true);
+CREATE POLICY "Superadmins manage roles" ON public.user_roles
+  FOR ALL TO authenticated
+  USING (public.has_role(auth.uid(), 'superadmin'))
+  WITH CHECK (public.has_role(auth.uid(), 'superadmin'));
+
+-- Auto-create profile on signup, first user becomes superadmin
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  has_superadmin boolean;
+BEGIN
+  INSERT INTO public.profiles (id, full_name, email)
+  VALUES (NEW.id, COALESCE(NEW.raw_user_meta_data->>'full_name', NEW.email), NEW.email)
+  ON CONFLICT (id) DO NOTHING;
+
+  SELECT EXISTS(SELECT 1 FROM public.user_roles WHERE role = 'superadmin') INTO has_superadmin;
+  IF NOT has_superadmin THEN
+    INSERT INTO public.user_roles (user_id, role) VALUES (NEW.id, 'superadmin');
+  END IF;
+  RETURN NEW;
+END $$;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+AFTER INSERT ON auth.users
+FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
+
+
+-- ============================================================================
+-- 4. LEGACY AGENTS TABLE (kept for cash-collection logs only; not used for auth)
+--    Real auth lives in user_roles. This table is OPTIONAL — only used by the
+--    exception path when an admin records a manual cash code under an agent.
+-- ============================================================================
+CREATE TABLE public.agents (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        text NOT NULL,
+  username    text NOT NULL UNIQUE,
+  password    text NOT NULL,
+  role        text NOT NULL DEFAULT 'agent',
+  status      text NOT NULL DEFAULT 'active',
+  last_login  timestamptz,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.agents TO anon, authenticated;
+GRANT ALL ON public.agents TO service_role;
+ALTER TABLE public.agents ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public agents access" ON public.agents FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+CREATE TABLE public.agent_logs (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_name   text NOT NULL,
+  agent_role   text NOT NULL,
+  action       text NOT NULL,
+  target_type  text,
+  target_id    text,
+  details      text,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT ON public.agent_logs TO anon, authenticated;
+GRANT ALL ON public.agent_logs TO service_role;
+ALTER TABLE public.agent_logs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Read agent logs"  ON public.agent_logs FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Write agent logs" ON public.agent_logs FOR INSERT TO anon, authenticated WITH CHECK (true);
+
+
+-- ============================================================================
+-- 5. SCHOOLS — used to tag student tickets and prefix the school name
+-- ============================================================================
+CREATE TABLE public.schools (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        text NOT NULL,
+  prefix      text NOT NULL,
+  status      text NOT NULL DEFAULT 'active',
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT ON public.schools TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.schools TO authenticated;
+GRANT ALL ON public.schools TO service_role;
+ALTER TABLE public.schools ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Schools readable"  ON public.schools FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Schools writable"  ON public.schools FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+
+-- ============================================================================
+-- 6. TICKET TIERS — all-in pricing (no extra reg fee)
+-- ============================================================================
+CREATE TABLE public.ticket_tiers (
+  id                       uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                     text NOT NULL,
+  description              text,
+  price                    integer NOT NULL,
+  quantity_total           integer NOT NULL DEFAULT 0,
+  quantity_sold            integer NOT NULL DEFAULT 0,
+  is_active                boolean NOT NULL DEFAULT true,
+  is_table_tier            boolean NOT NULL DEFAULT false,
+  seats_per_table          integer NOT NULL DEFAULT 1,
+  sort_order               integer NOT NULL DEFAULT 0,
+  perks                    jsonb   NOT NULL DEFAULT '[]'::jsonb,
+  homepage_visible         boolean NOT NULL DEFAULT true,
+  homepage_label           text,
+  homepage_show_sold       boolean NOT NULL DEFAULT true,
+  homepage_show_remaining  boolean NOT NULL DEFAULT true,
+  homepage_force_soldout   boolean NOT NULL DEFAULT false,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  updated_at               timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT ON public.ticket_tiers TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.ticket_tiers TO authenticated;
+GRANT ALL ON public.ticket_tiers TO service_role;
+ALTER TABLE public.ticket_tiers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Tiers readable" ON public.ticket_tiers FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Tiers writable" ON public.ticket_tiers FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+CREATE TRIGGER trg_ticket_tiers_updated_at
+BEFORE UPDATE ON public.ticket_tiers
+FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+-- ============================================================================
+-- 7. CODES — universal SG-#### codes
+--    NEW FLOW: codes are auto-generated by the system at payment submission.
+--    Manual codes (admin-issued for cash/comp) still allowed via exception tool.
+-- ============================================================================
+CREATE TABLE public.codes (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code            text NOT NULL UNIQUE,
+  status          text NOT NULL DEFAULT 'unused', -- unused | used | disabled
+  code_type       text NOT NULL DEFAULT 'student', -- student | general
+  school_id       uuid REFERENCES public.schools(id) ON DELETE SET NULL,
+  payment_method  text, -- self-service | cash | momo | comp
+  fee_amount      integer NOT NULL DEFAULT 0, -- 0 by default (all-in pricing)
+  created_by      text,
+  used_by_user_id uuid,
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT ON public.codes TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.codes TO authenticated;
+GRANT ALL ON public.codes TO service_role;
+ALTER TABLE public.codes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Codes readable" ON public.codes FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Codes writable" ON public.codes FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+CREATE INDEX idx_codes_status ON public.codes(status);
+CREATE INDEX idx_codes_school ON public.codes(school_id);
+
+
+-- ============================================================================
+-- 8. USERS — buyer/attendee records (NOT auth users)
+-- ============================================================================
+CREATE TABLE public.users (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code_id             uuid REFERENCES public.codes(id) ON DELETE SET NULL,
+  first_name          text NOT NULL,
+  last_name           text NOT NULL,
+  email               text NOT NULL,
+  phone               text NOT NULL,
+  gender              text NOT NULL,
+  department          text NOT NULL,
+  school_id           uuid REFERENCES public.schools(id) ON DELETE SET NULL,
+  school_name         text,
+  level               text,
+  section             text,
+  tier_id             uuid REFERENCES public.ticket_tiers(id) ON DELETE SET NULL,
+  ticket_price        integer NOT NULL DEFAULT 0,
+  -- All-in payment workflow
+  amount_paid         integer NOT NULL DEFAULT 0,
+  amount_remaining    integer NOT NULL DEFAULT 0,
+  paid_amount         integer NOT NULL DEFAULT 0,  -- legacy alias kept for compatibility
+  remaining_amount    integer NOT NULL DEFAULT 0,  -- legacy alias kept for compatibility
+  payment_status      text NOT NULL DEFAULT 'unpaid', -- unpaid | pending | paid | rejected
+  ticket_state        public.ticket_state NOT NULL DEFAULT 'pending',
+  early_reg_paid      boolean NOT NULL DEFAULT false, -- true ONLY for grandfathered early-bird holders
+  -- Entry / exit
+  entered             boolean NOT NULL DEFAULT false,
+  entered_at          timestamptz,
+  exited              boolean NOT NULL DEFAULT false,
+  exited_at           timestamptz,
+  ticket_printed      boolean NOT NULL DEFAULT false,
+  ticket_printed_at   timestamptz,
+  registered_at       timestamptz NOT NULL DEFAULT now(),
+  -- Incremented on every admin reprint so older QR codes become invalid.
+  qr_version          integer NOT NULL DEFAULT 1
+);
+GRANT SELECT ON public.users TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.users TO authenticated;
+GRANT ALL ON public.users TO service_role;
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users readable" ON public.users FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Users writable" ON public.users FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+-- FK so AdminCodes can join codes → users
+ALTER TABLE public.codes
+  ADD CONSTRAINT fk_codes_used_by FOREIGN KEY (used_by_user_id)
+  REFERENCES public.users(id) ON DELETE SET NULL;
+
+CREATE INDEX idx_users_tier         ON public.users(tier_id);
+CREATE INDEX idx_users_ticket_state ON public.users(ticket_state);
+CREATE INDEX idx_users_early_reg    ON public.users(early_reg_paid);
+CREATE INDEX idx_users_email        ON public.users(email);
+
+
+-- ============================================================================
+-- 9. PAYMENTS — one row per MoMo proof submission (review queue)
+-- ============================================================================
+CREATE TABLE public.payments (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  amount            integer NOT NULL,
+  method            text NOT NULL DEFAULT 'momo', -- momo | cash | comp
+  momo_name         text,
+  momo_number_used  text,
+  transaction_id    text,
+  screenshot_url    text,
+  status            text NOT NULL DEFAULT 'pending', -- pending | approved | rejected
+  review_note       text,
+  rejection_reason  text,
+  reviewed_by       text,
+  reviewed_at       timestamptz,
+  submitted_at      timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT ON public.payments TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.payments TO authenticated;
+GRANT ALL ON public.payments TO service_role;
+ALTER TABLE public.payments ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Payments readable" ON public.payments FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Payments writable" ON public.payments FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+CREATE INDEX idx_payments_status ON public.payments(status);
+CREATE INDEX idx_payments_user   ON public.payments(user_id);
+
+-- Auto-bump ticket_tiers.quantity_sold when a payment is approved
+CREATE OR REPLACE FUNCTION public.increment_tier_sold()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE v_tier_id uuid;
+BEGIN
+  IF NEW.status = 'approved' AND (OLD.status IS DISTINCT FROM 'approved') THEN
+    SELECT tier_id INTO v_tier_id FROM public.users WHERE id = NEW.user_id;
+    IF v_tier_id IS NOT NULL THEN
+      UPDATE public.ticket_tiers SET quantity_sold = quantity_sold + 1 WHERE id = v_tier_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+
+CREATE TRIGGER trg_payments_increment_sold
+AFTER UPDATE ON public.payments
+FOR EACH ROW EXECUTE FUNCTION public.increment_tier_sold();
+
+
+-- ============================================================================
+-- 10. TRANSACTIONS — append-only ledger of money movements (for reporting)
+-- ============================================================================
+CREATE TABLE public.transactions (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  payment_id   uuid REFERENCES public.payments(id) ON DELETE SET NULL,
+  amount       integer NOT NULL,
+  method       text NOT NULL,
+  recorded_by  text,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT ON public.transactions TO anon, authenticated;
+GRANT ALL ON public.transactions TO service_role;
+ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Transactions readable" ON public.transactions FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Transactions writable" ON public.transactions FOR INSERT TO anon, authenticated WITH CHECK (true);
+
+
+-- ============================================================================
+-- 11. SCAN LOGS — every QR scan attempt at entry/exit gates
+-- ============================================================================
+CREATE TABLE public.scan_logs (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id             uuid REFERENCES public.users(id) ON DELETE SET NULL,
+  scanned_code        text,
+  gate                text NOT NULL DEFAULT 'entry', -- entry | exit
+  result              text NOT NULL,                 -- admit | reject | pending_override | already_used | invalid
+  scanned_by_email    text,
+  scanned_by_user_id  uuid,
+  scanned_by_ip       text,
+  scanned_at          timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT ON public.scan_logs TO anon, authenticated;
+GRANT ALL ON public.scan_logs TO service_role;
+ALTER TABLE public.scan_logs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Scan logs readable" ON public.scan_logs FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Scan logs writable" ON public.scan_logs FOR INSERT TO anon, authenticated WITH CHECK (true);
+
+CREATE INDEX idx_scan_logs_user ON public.scan_logs(user_id);
+CREATE INDEX idx_scan_logs_gate ON public.scan_logs(gate);
+
+
+-- ============================================================================
+-- 12. TICKET PRINT LOGS — track who printed a ticket and why
+-- ============================================================================
+CREATE TABLE public.ticket_print_logs (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id           uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  print_type        text NOT NULL DEFAULT 'original', -- original | reprint
+  is_admin_reprint  boolean NOT NULL DEFAULT false,
+  printed_by_email  text,
+  reason            text,
+  created_at        timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT ON public.ticket_print_logs TO anon, authenticated;
+GRANT ALL ON public.ticket_print_logs TO service_role;
+ALTER TABLE public.ticket_print_logs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Print logs readable" ON public.ticket_print_logs FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Print logs writable" ON public.ticket_print_logs FOR INSERT TO anon, authenticated WITH CHECK (true);
+
+
+-- ============================================================================
+-- 13. REFUNDS — handled manually when event is cancelled
+-- ============================================================================
+CREATE TABLE public.refunds (
+  id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id             uuid NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+  original_amount     integer NOT NULL,
+  momo_fee            integer NOT NULL DEFAULT 0,
+  refund_amount       integer NOT NULL,
+  refund_method       text DEFAULT 'momo',
+  refund_phone        text,
+  reason              text DEFAULT 'event_cancelled',
+  status              text NOT NULL DEFAULT 'pending',
+  processed_by_email  text,
+  processed_at        timestamptz,
+  created_at          timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.refunds TO anon, authenticated;
+GRANT ALL ON public.refunds TO service_role;
+ALTER TABLE public.refunds ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Refunds full access" ON public.refunds FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+
+-- ============================================================================
+-- 14. SETTINGS — key/value global config (prices, venue, MoMo numbers...)
+-- ============================================================================
+CREATE TABLE public.settings (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  key         text NOT NULL UNIQUE,
+  value       text NOT NULL DEFAULT '',
+  updated_at  timestamptz NOT NULL DEFAULT now()
+);
+GRANT SELECT ON public.settings TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.settings TO authenticated;
+GRANT ALL ON public.settings TO service_role;
+ALTER TABLE public.settings ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Settings readable" ON public.settings FOR SELECT TO anon, authenticated USING (true);
+CREATE POLICY "Settings writable" ON public.settings FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+CREATE TRIGGER trg_settings_updated_at
+BEFORE UPDATE ON public.settings
+FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+-- ============================================================================
+-- 15. CONTACT MESSAGES — public contact form
+-- ============================================================================
+CREATE TABLE public.contact_messages (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name        text NOT NULL,
+  email       text NOT NULL,
+  message     text NOT NULL,
+  read        boolean NOT NULL DEFAULT false,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+GRANT INSERT ON public.contact_messages TO anon;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.contact_messages TO authenticated;
+GRANT ALL ON public.contact_messages TO service_role;
+ALTER TABLE public.contact_messages ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Contact insert"  ON public.contact_messages FOR INSERT TO anon, authenticated WITH CHECK (true);
+CREATE POLICY "Contact full"    ON public.contact_messages FOR ALL    TO authenticated USING (true) WITH CHECK (true);
+
+
+-- -- ============================================================================
+-- 16. STORAGE BUCKETS — payment proofs, student IDs, gallery
+-- ============================================================================
+INSERT INTO storage.buckets (id, name, public) VALUES
+  ('payments',    'payments',    true),
+  ('student-ids', 'student-ids', true),
+  ('gallery',     'gallery',     true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Force-drop existing policies explicitly pointing to storage.objects
+DROP POLICY IF EXISTS "Public read payments"    ON storage.objects;
+DROP POLICY IF EXISTS "Public write payments"   ON storage.objects;
+DROP POLICY IF EXISTS "Public read student-ids" ON storage.objects;
+DROP POLICY IF EXISTS "Public write student-ids"ON storage.objects;
+DROP POLICY IF EXISTS "Public read gallery"     ON storage.objects;
+DROP POLICY IF EXISTS "Auth write gallery"      ON storage.objects;
+
+-- Re-create the storage policies safely
+CREATE POLICY "Public read payments"    ON storage.objects FOR SELECT USING (bucket_id = 'payments');
+CREATE POLICY "Public write payments"   ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'payments');
+CREATE POLICY "Public read student-ids" ON storage.objects FOR SELECT USING (bucket_id = 'student-ids');
+CREATE POLICY "Public write student-ids"ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'student-ids');
+CREATE POLICY "Public read gallery"     ON storage.objects FOR SELECT USING (bucket_id = 'gallery');
+CREATE POLICY "Auth write gallery"      ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'gallery');
+
+
+-- ============================================================================
+-- 17. SEED DATA — initial ticket tiers, settings, schools
+-- ============================================================================
+INSERT INTO public.ticket_tiers (name, description, price, quantity_total, sort_order, homepage_label, perks) VALUES
+  ('Founder', 'First 50 supporters — locked-in launch price',                19500, 50,  1, 'Founder',       '["Early access","Founder badge on e-ticket"]'::jsonb),
+  ('General', 'Standard all-in admission',                                    26500, 400, 2, 'General',       '["Buffet dinner","Soda/water/juice","DJ & dance floor"]'::jsonb),
+  ('VIP',     'Privée — premium seating, faster entry, dedicated host',       36500, 50,  3, 'VIP / Privée',  '["Premium seating","Fast-track entry","Welcome drink"]'::jsonb);
+
+INSERT INTO public.settings (key, value) VALUES
+  ('event_name',       'Senior Gala Kigali 2026'),
+  ('event_date',       '2026-08-15T18:00:00+02:00'),
+  ('venue_confirmed',  'false'),
+  ('venue_name',       ''),
+  ('contact_email',    'sadcorporation1@gmail.com'),
+  ('contact_phone',    '+250 780 266 792'),
+  ('momo_methods',     '[]'),
+  -- Auto-generated on first use by the app if empty; safe to leave blank.
+  ('qr_secret',        ''),
+  ('momo_account_name','')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO public.schools (name, prefix) VALUES
+  ('General Public (Other)', 'OTH')
+ON CONFLICT DO NOTHING;
+
+
+-- ============================================================================
+-- DONE
+-- After running this:
+--   1. Sign up the FIRST staff user at /sg26-staff/login (becomes superadmin).
+--   2. Add real schools, MoMo numbers, venue, and any extra staff roles in /admin.
+--   3. The public Register page will auto-issue codes on payment submission.
+-- ============================================================================

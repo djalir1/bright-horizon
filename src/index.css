@@ -1,0 +1,239 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 4%;
+    --foreground: 36 33% 93%;
+
+    --card: 0 0% 7%;
+    --card-foreground: 36 33% 93%;
+
+    --popover: 0 0% 7%;
+    --popover-foreground: 36 33% 93%;
+
+    --primary: 42 55% 54%;
+    --primary-foreground: 0 0% 4%;
+
+    --secondary: 0 0% 10%;
+    --secondary-foreground: 36 33% 93%;
+
+    --muted: 0 0% 10%;
+    --muted-foreground: 33 14% 49%;
+
+    --accent: 42 55% 54%;
+    --accent-foreground: 0 0% 4%;
+
+    --destructive: 4 67% 47%;
+    --destructive-foreground: 36 33% 93%;
+
+    --success: 153 40% 30%;
+    --success-foreground: 36 33% 93%;
+
+    --border: 42 55% 54% / 0.2;
+    --border-strong: 42 55% 54% / 0.5;
+    --input: 0 0% 10%;
+    --ring: 42 55% 54%;
+
+    --radius: 0.5rem;
+
+    --sidebar-background: 0 0% 5%;
+    --sidebar-foreground: 36 33% 93%;
+    --sidebar-primary: 42 55% 54%;
+    --sidebar-primary-foreground: 0 0% 4%;
+    --sidebar-accent: 0 0% 10%;
+    --sidebar-accent-foreground: 36 33% 93%;
+    --sidebar-border: 42 55% 54% / 0.15;
+    --sidebar-ring: 42 55% 54%;
+
+    /* Raw colors for direct use */
+    --color-gold: #C9A84C;
+    --color-gold-light: #E8D5A3;
+    --color-gold-dark: #8B6914;
+    --color-surface-2: #1A1A1A;
+    --color-text: #F5F0E8;
+    --color-text-muted: #8A8070;
+  }
+
+  /* Admin light mode — scoped via .admin-light wrapper, only affects admin */
+  .admin-light {
+    --background: 36 30% 97%;
+    --foreground: 30 10% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 30 10% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 30 10% 12%;
+    --primary: 38 60% 38%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 36 20% 92%;
+    --secondary-foreground: 30 10% 12%;
+    --muted: 36 20% 92%;
+    --muted-foreground: 30 8% 40%;
+    --accent: 38 60% 38%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 4 67% 47%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 38 40% 60% / 0.35;
+    --input: 36 20% 92%;
+    --ring: 38 60% 38%;
+    --sidebar-background: 36 30% 94%;
+    --sidebar-foreground: 30 10% 12%;
+    --sidebar-accent: 36 20% 88%;
+    --sidebar-accent-foreground: 30 10% 12%;
+    --sidebar-border: 38 40% 60% / 0.25;
+  }
+  .admin-light .gold-card {
+    background: hsl(0 0% 100%);
+    border-color: rgba(139, 105, 20, 0.25);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .admin-light .gold-card:hover {
+    border-color: rgba(139, 105, 20, 0.5);
+    box-shadow: 0 4px 16px -4px rgba(139, 105, 20, 0.15);
+  }
+  .admin-light .text-gold-gradient {
+    background: linear-gradient(135deg, #8B6914, #C9A84C, #8B6914);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  /* Re-skin dark hard-coded surfaces for admin light mode */
+  .admin-light .bg-surface { background-color: #F3EDE0 !important; }
+  .admin-light .bg-surface-2 { background-color: #FFFFFF !important; }
+  .admin-light .hover\:bg-surface:hover { background-color: #EFE8D8 !important; }
+  .admin-light .hover\:bg-surface-2:hover { background-color: #F3EDE0 !important; }
+  .admin-light .bg-background\/60 { background-color: rgba(30, 20, 5, 0.4) !important; }
+  .admin-light .bg-background\/80 { background-color: rgba(30, 20, 5, 0.5) !important; }
+  /* Tab/option chips */
+  .admin-light .bg-gold\/10 { background-color: rgba(201, 168, 76, 0.18) !important; }
+  .admin-light input::placeholder,
+  .admin-light textarea::placeholder { color: rgba(60, 50, 35, 0.5) !important; }
+  /* Light-mode scrollbar */
+  .admin-light ::-webkit-scrollbar-track { background: #F3EDE0; }
+  .admin-light ::-webkit-scrollbar-thumb { background: rgba(139, 105, 20, 0.35); }
+  .admin-light ::-webkit-scrollbar-thumb:hover { background: rgba(139, 105, 20, 0.55); }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'DM Sans', sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Cormorant Garamond', serif;
+  }
+
+  code, .font-mono {
+    font-family: 'JetBrains Mono', monospace;
+  }
+}
+
+/* Gold sparkle particles */
+@keyframes sparkle {
+  0%, 100% { opacity: 0.45; transform: scale(0.85) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1.15) rotate(180deg); }
+}
+
+@keyframes float-up {
+  0% { opacity: 0; transform: translateY(20px); }
+  20% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-100vh); }
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+
+@keyframes pulse-gold {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(201, 168, 76, 0.4); }
+  50% { box-shadow: 0 0 20px 5px rgba(201, 168, 76, 0.1); }
+}
+
+.sparkle-bg {
+  position: relative;
+  overflow: hidden;
+}
+
+.sparkle-bg::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: 
+    radial-gradient(1.5px 1.5px at 10% 20%, rgba(232, 213, 163, 1) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 30% 60%, rgba(232, 213, 163, 0.85) 0%, transparent 100%),
+    radial-gradient(2px 2px at 50% 10%, rgba(255, 230, 160, 1) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 70% 40%, rgba(232, 213, 163, 0.8) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 90% 70%, rgba(201, 168, 76, 0.95) 0%, transparent 100%),
+    radial-gradient(2px 2px at 20% 80%, rgba(232, 213, 163, 0.85) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 60% 90%, rgba(232, 213, 163, 1) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 80% 15%, rgba(255, 230, 160, 0.9) 0%, transparent 100%),
+    radial-gradient(2px 2px at 40% 45%, rgba(232, 213, 163, 0.85) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 15% 55%, rgba(201, 168, 76, 1) 0%, transparent 100%);
+  animation: sparkle 4s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.sparkle-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: 
+    radial-gradient(1.5px 1.5px at 25% 35%, rgba(232, 213, 163, 0.9) 0%, transparent 100%),
+    radial-gradient(2px 2px at 55% 25%, rgba(255, 230, 160, 0.9) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 75% 65%, rgba(201, 168, 76, 0.85) 0%, transparent 100%),
+    radial-gradient(1.5px 1.5px at 45% 75%, rgba(232, 213, 163, 1) 0%, transparent 100%),
+    radial-gradient(2px 2px at 85% 45%, rgba(255, 230, 160, 0.9) 0%, transparent 100%);
+  animation: sparkle 4s ease-in-out infinite 2s;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Gold gradient text */
+.text-gold-gradient {
+  background: linear-gradient(135deg, #C9A84C, #E8D5A3, #C9A84C);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Gold shimmer effect */
+.gold-shimmer {
+  background: linear-gradient(90deg, transparent, rgba(201, 168, 76, 0.1), transparent);
+  background-size: 200% 100%;
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+/* Gold border card */
+.gold-card {
+  background: hsl(0 0% 7%);
+  border: 1px solid rgba(201, 168, 76, 0.2);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.gold-card:hover {
+  border-color: rgba(201, 168, 76, 0.5);
+  box-shadow: 0 0 30px -10px rgba(201, 168, 76, 0.15);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0A0A0A;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(201, 168, 76, 0.3);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(201, 168, 76, 0.5);
+}
